@@ -1,0 +1,13 @@
+# Environment variables
+.env
+
+# Docker volumes
+litellm_hub_pg_data/
+
+# Logs
+*.log
+/tmp/
+
+# OS files
+.DS_Store
+Thumbs.db

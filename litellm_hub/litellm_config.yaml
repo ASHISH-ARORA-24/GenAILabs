@@ -1,0 +1,19 @@
+model_list:
+  - model_name: phi
+    litellm_params:
+      model: ollama/phi:latest
+      api_base: os.environ/OLLAMA_BASE_URL
+
+  - model_name: qwen2.5
+    litellm_params:
+      model: ollama/qwen2.5:0.5b
+      api_base: os.environ/OLLAMA_BASE_URL
+
+  - model_name: tinyllama
+    litellm_params:
+      model: ollama/tinyllama:1.1b
+      api_base: os.environ/OLLAMA_BASE_URL
+
+litellm_settings:
+  drop_params: true
+  set_verbose: true
