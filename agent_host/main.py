@@ -9,6 +9,10 @@ from typing import List, Dict, Optional
 
 class QueryRequest(BaseModel):
     user_query: str
+    routing_mode: str = "auto" # auto or manual
+    selected_agent: Optional[str] = None # used if routing_mode is "manual"
+
+
 
 
 class QueryResponse(BaseModel):
@@ -65,21 +69,38 @@ def register_builtin_dummy_agent() -> None:
         health_status="healthy",
     )
     AGENT_REGISTRY[dummy.agent_name] = dummy
+# ==========
+# DummyAgent implementation (Segment 3)
+# ==========
+def dummy_agent_handle(user_query: str) -> str:
+    """
+    Very simple implementation for DummyAgent.
+    For now, it just echoes the user's query.
+    Later, real agents will do MCP/RAG/API work.
+    """
+    return f"DummyAgent got your query: {user_query}"
 
 
+# Mapping of agent_name -> handler function
+AGENT_HANDLERS = {
+    "DummyAgent": dummy_agent_handle,
+}
 # ==========
 # FastAPI app
 # ==========
 
 app = FastAPI(
     title="AgentHost MVP",
-    version="0.0.2",
+    version="0.0.4",
     description=(
-        "Minimal skeleton for AgentHost with an in-memory agent registry. "
-        "No routing or real agent execution yet."
+        "AgentHost with in-memory agent registry, a simple DummyAgent, "
+        "and basic routing_mode support (auto/manual). No LLM routing yet."
     ),
 )
 
+# ==========
+# app startup
+# ==========
 
 @app.on_event("startup")
 async def startup_event() -> None:
@@ -92,12 +113,42 @@ async def startup_event() -> None:
 @app.post("/agenthost/query", response_model=QueryResponse)
 async def handle_query(payload: QueryRequest) -> QueryResponse:
     """
-    Segment 1:
-    - Just confirm that AgentHost receives queries.
-    - Still: No LLM, no routing, no agents being executed.
+    Segment 4:
+    - Accept routing_mode: 'auto' or 'manual'.
+    - If manual: use payload.selected_agent (must exist in registry and handlers).
+    - If auto: for now, always use DummyAgent (LLM router will come later).
     """
-    return QueryResponse(reply=f"AgentHost received your query: {payload.user_query}")
 
+    # Decide which agent to use
+    if payload.routing_mode == "manual":
+        # Manual mode: user must specify selected_agent
+        if not payload.selected_agent:
+            return QueryResponse(
+                reply=(
+                    "AgentHost error: routing_mode='manual' requires 'selected_agent' "
+                    "to be provided."
+                )
+            )
+        agent_name = payload.selected_agent
+    else:
+        # Auto mode (or any other) – for now always DummyAgent
+        agent_name = "DummyAgent"
+    # Look up agent in registry and handler mapping
+    agent_info = AGENT_REGISTRY.get(agent_name)
+    handler = AGENT_HANDLERS.get(agent_name)
+
+    if agent_info is None or handler is None:
+        return QueryResponse(
+            reply=(
+                f"AgentHost error: selected agent '{agent_name}' "
+                "is not available in registry/handlers."
+            )
+        )
+
+    # Call the agent handler
+    agent_reply = handler(payload.user_query)
+
+    return QueryResponse(reply=agent_reply)
 
 @app.get("/agenthost/agents", response_model=AgentsListResponse)
 async def list_agents() -> AgentsListResponse:
@@ -108,7 +159,6 @@ async def list_agents() -> AgentsListResponse:
     """
     agents = list(AGENT_REGISTRY.values())
     return AgentsListResponse(agents=agents)
-
 
 if __name__ == "__main__":
     import uvicorn
