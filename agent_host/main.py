@@ -4,59 +4,81 @@ from typing import List, Dict, Optional, Any
 import httpx
 import os
 import uuid
+import logging
+from logging.handlers import RotatingFileHandler
 
 
-# ==========
-# LiteLLM configuration (for router + composer)
-# ==========
+# ============================================================
+# LOGGING (Console + File Rotating Logs)
+# ============================================================
+
+os.makedirs("logs", exist_ok=True)
+
+LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s - %(message)s"
+
+console_handler = logging.StreamHandler()
+console_handler.setFormatter(logging.Formatter(LOG_FORMAT))
+
+file_handler = RotatingFileHandler(
+    "logs/agenthost.log",
+    maxBytes=5_000_000,   # 5MB
+    backupCount=5
+)
+file_handler.setFormatter(logging.Formatter(LOG_FORMAT))
+
+logger = logging.getLogger("agenthost")
+logger.setLevel(logging.INFO)
+logger.addHandler(console_handler)
+logger.addHandler(file_handler)
+
+
+# ============================================================
+# LITELLM CONFIG
+# ============================================================
 
 LITELLM_BASE_URL = os.getenv("LITELLM_BASE_URL", "http://localhost:4100")
 LITELLM_API_KEY = os.getenv("LITELLM_API_KEY", "sk-litellm-hub-local-123")
 
-# For routing, use a small, cheap model
 ROUTER_MODEL_NAME = os.getenv("ROUTER_MODEL_NAME", "tinyllama")
-
-# For composing final answers, you can use a slightly better model
-COMPOSER_MODEL_NAME = os.getenv("COMPOSER_MODEL_NAME", "qwen2.5")
+COMPOSER_MODEL_NAME = os.getenv("COMPOSER_MODEL_NAME", "qwen2.5")  # also used for fallback chat
 
 
-# ==========
-# Request/Response models for user query (Streamlit ↔ AgentHost)
-# ==========
+# ============================================================
+# MODELS: UI ↔ AgentHost
+# ============================================================
 
 class QueryRequest(BaseModel):
     user_query: str
-    routing_mode: str = "auto"              # "auto" or "manual"
-    selected_agent: Optional[str] = None    # used only when routing_mode = "manual"
+    routing_mode: str = "auto"            # auto/manual
+    selected_agent: Optional[str] = None  # only used in manual mode
 
 
 class QueryResponse(BaseModel):
     reply: str
 
 
-# ==========
-# Execution Contract models (AgentHost ↔ Agents)
-# ==========
+# ============================================================
+# MODELS: AgentHost ↔ Agents (Execution Contract)
+# ============================================================
 
 class ExecutionRequest(BaseModel):
     request_id: str
     user_query: str
     routing_mode: str
     selected_agent: str
-    # later: session_context, parsed_parameters, agent_instructions, etc.
 
 
 class ExecutionResponse(BaseModel):
     request_id: str
-    status: str                 # "success" | "error" | "partial"
+    status: str                     # success/error/partial
     result: Optional[Any] = None
     error: Optional[str] = None
     metadata: Optional[Dict[str, Any]] = None
 
 
-# ==========
-# Agent Registry models
-# ==========
+# ============================================================
+# AGENT REGISTRY MODELS
+# ============================================================
 
 class AgentInfo(BaseModel):
     agent_name: str
@@ -67,414 +89,430 @@ class AgentInfo(BaseModel):
     usage_hints: Optional[str] = None
     how_to_call: str
     version: Optional[str] = None
-    health_status: str  # e.g. "healthy", "unhealthy", "unknown"
+    health_status: str
 
 
 class AgentsListResponse(BaseModel):
     agents: List[AgentInfo]
 
 
-# In-memory registry
+# Used for Register API
+class AgentRegisterRequest(BaseModel):
+    agent_name: str
+    description: str
+    capability_tags: List[str] = []
+    curated_routing_prompts: str = ""
+    example_queries: List[str] = []
+    usage_hints: Optional[str] = None
+    how_to_call: str
+    version: Optional[str] = None
+    health_status: str = "healthy"
+
+
+# Used for Deregister API
+class AgentDeregisterRequest(BaseModel):
+    agent_name: str
+
+
 AGENT_REGISTRY: Dict[str, AgentInfo] = {}
 
 
-def register_builtin_dummy_agent() -> None:
-    """
-    Register a single DummyAgent in the in-memory registry.
-    This is just data; routing and execution are wired separately.
-    """
+# ============================================================
+# REGISTER BUILT-IN DUMMY AGENT
+# ============================================================
+
+def register_builtin_dummy_agent():
     dummy = AgentInfo(
         agent_name="DummyAgent",
-        description="A simple built-in agent used for testing the AgentHost registry.",
-        capability_tags=["test", "dummy", "echo"],
-        curated_routing_prompts=(
-            "Select this agent only for testing or echo-style queries. "
-            "It does not perform any real work and is used to validate the AgentHost pipeline."
-        ),
-        example_queries=[
-            "Test if AgentHost can see this agent.",
-            "Echo my message using DummyAgent.",
-        ],
-        usage_hints=(
-            "Responses from this agent are only for debugging and should not be treated as real results."
-        ),
+        description="A simple built-in agent used for testing the AgentHost pipeline.",
+        capability_tags=["test", "echo", "dummy"],
+        curated_routing_prompts="Use this agent only for basic testing or echo responses.",
+        example_queries=["test agent", "echo this", "hello"],
+        usage_hints="This agent only echoes back.",
         how_to_call="internal://dummy",
-        version="v0.0.1",
+        version="v1",
         health_status="healthy",
     )
     AGENT_REGISTRY[dummy.agent_name] = dummy
 
 
-# ==========
-# DummyAgent implementation (uses ExecutionRequest/ExecutionResponse)
-# ==========
+# ============================================================
+# DUMMY AGENT IMPLEMENTATION
+# ============================================================
 
 def dummy_agent_handle(exec_request: ExecutionRequest) -> ExecutionResponse:
-    """
-    Very simple implementation for DummyAgent.
-
-    - Accepts a structured ExecutionRequest.
-    - Returns an ExecutionResponse with status 'success'.
-    - result is just an echo string for now.
-    """
-
-    echo_text = f"DummyAgent got your query: {exec_request.user_query}"
-
+    echo = f"DummyAgent got your query: {exec_request.user_query}"
     return ExecutionResponse(
         request_id=exec_request.request_id,
         status="success",
-        result=echo_text,
+        result=echo,
         error=None,
-        metadata={
-            "agent": "DummyAgent",
-            "routing_mode": exec_request.routing_mode,
-        },
+        metadata={"agent": "DummyAgent"},
     )
 
 
-# Mapping of agent_name -> handler function (ExecutionRequest -> ExecutionResponse)
 AGENT_HANDLERS = {
-    "DummyAgent": dummy_agent_handle,
+    "DummyAgent": dummy_agent_handle
 }
 
 
-# ==========
-# LLM Agent Selection helper (Router)
-# ==========
+# ============================================================
+# ROUTER LLM - Select Agent
+# ============================================================
 
 def select_agent_with_llm(user_query: str, agents: List[AgentInfo]) -> Optional[str]:
-    """
-    Use LiteLLM to decide which agent should handle the query.
-
-    - Sends user_query + detailed agent metadata:
-        * agent_name
-        * description
-        * capability_tags
-        * curated_routing_prompts
-        * example_queries
-    - Asks the LLM to pick the single best agent.
-    - Tries to match the LLM output against known agent names.
-    - On any error or mismatch, returns None so AgentHost can fallback.
-    """
-
     if not agents:
+        logger.warning("[router] No agents registered (or none eligible).")
         return None
 
-    # Build a rich textual description of agents using all the routing metadata
-    agents_text_lines = []
-    for agent in agents:
-        lines = [
-            f"Agent Name: {agent.agent_name}",
-            f"Description: {agent.description}",
-            f"Tags: {', '.join(agent.capability_tags) if agent.capability_tags else 'None'}",
-            f"When to use: {agent.curated_routing_prompts}",
-        ]
-        if agent.example_queries:
-            lines.append("Example queries:")
-            for ex in agent.example_queries[:3]:
-                lines.append(f"  - {ex}")
-        agents_text_lines.append("\n".join(lines))
-
-    agents_text = "\n\n".join(agents_text_lines)
+    # Build agents description block
+    agents_text = ""
+    for a in agents:
+        agents_text += (
+            f"Agent Name: {a.agent_name}\n"
+            f"Description: {a.description}\n"
+            f"Tags: {', '.join(a.capability_tags)}\n"
+            f"When to use: {a.curated_routing_prompts}\n"
+            f"Example queries: {a.example_queries[:3]}\n\n"
+        )
 
     system_message = (
-        "You are an agent router.\n"
-        "You are given a user query and a list of available agents with their descriptions, "
-        "tags, routing hints, and example queries.\n"
-        "Your job is to choose the single best agent to handle the query.\n"
-        "You must reply with ONLY the agent_name as plain text (for example: DummyAgent).\n"
-        "If no agent is appropriate, reply with: none"
+        "You are an agent router. Pick ONE agent.\n"
+        "Reply ONLY with the agent name or 'none'."
     )
 
     user_message = (
         f"User query:\n{user_query}\n\n"
-        f"Available agents:\n{agents_text}\n\n"
-        "Based on the descriptions, tags, routing hints, and example queries above, "
-        "which agent should handle this query?\n"
-        "Remember: reply with only the agent_name or 'none'."
+        f"Available agents:\n{agents_text}"
     )
 
     payload = {
         "model": ROUTER_MODEL_NAME,
         "messages": [
             {"role": "system", "content": system_message},
-            {"role": "user", "content": user_message},
+            {"role": "user", "content": user_message}
         ],
         "max_tokens": 32,
     }
 
     try:
-        with httpx.Client(timeout=15.0) as client:
+        with httpx.Client(timeout=15) as client:
             resp = client.post(
                 f"{LITELLM_BASE_URL}/v1/chat/completions",
-                headers={
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {LITELLM_API_KEY}",
-                },
                 json=payload,
+                headers={"Authorization": f"Bearer {LITELLM_API_KEY}"},
             )
         resp.raise_for_status()
-        data = resp.json()
+        out = resp.json()["choices"][0]["message"]["content"].strip()
 
-        raw_content = data["choices"][0]["message"]["content"]
-        if not raw_content:
+        if out.lower() == "none":
+            logger.info("[router] LLM selected none.")
             return None
 
-        content = raw_content.strip()
-        lower = content.lower()
+        for a in agents:
+            if a.agent_name.lower() in out.lower():
+                logger.info("[router] LLM selected agent: %s", a.agent_name)
+                return a.agent_name
 
-        # 1) If it clearly says 'none'
-        if "none" in lower:
-            return None
-
-        # 2) Try to match against known agent names (case-insensitive containment)
-        for agent in agents:
-            name_lower = agent.agent_name.lower()
-            if name_lower in lower:
-                return agent.agent_name
-
-        # 3) Try first token exact match
-        first_token = content.split()[0].strip()
-        for agent in agents:
-            if first_token == agent.agent_name:
-                return agent.agent_name
-
-        # 4) If nothing matched, return None so AgentHost can fallback
-        print(f"[select_agent_with_llm] Could not match router output to any agent. Raw: {raw_content!r}")
+        logger.warning("[router] No valid match for LLM output: %r", out)
         return None
 
     except Exception as e:
-        print(f"[select_agent_with_llm] Error calling LiteLLM (router): {e}")
+        logger.error("[router] Error calling router LLM: %s", e)
         return None
 
 
-# ==========
-# LLM Composer helper (Final answer formatting)  [Segment 8]
-# ==========
+# ============================================================
+# FALLBACK CHAT (When no agent can be used)
+# ============================================================
 
-def compose_final_answer_with_llm(
-    user_query: str,
-    agent_name: str,
-    agent_info: AgentInfo,
-    exec_response: ExecutionResponse,
-) -> str:
-    """
-    Use LiteLLM to turn ExecutionResponse + context into a user-friendly final answer.
-
-    - If status = success: explain result in clear language.
-    - If status = error: explain the error politely.
-    - If status = partial (future): explain what was done and what is missing.
-
-    On any LLM error, falls back to a simple non-LLM answer.
-    """
-
-    status = exec_response.status
-    raw_result = exec_response.result
-    error_text = exec_response.error
-
-    # Fallback string builder (used if LLM fails)
-    def build_fallback() -> str:
-        if status != "success":
-            return (
-                f"Agent '{agent_name}' could not complete the request. "
-                f"Status: {status}. Details: {error_text or 'Unknown error.'}"
-            )
-        return str(raw_result) if raw_result is not None else ""
-
-    # Prepare context for LLM
-    result_str = str(raw_result) if raw_result is not None else "None"
-    metadata_str = str(exec_response.metadata) if exec_response.metadata is not None else "None"
-    usage_hints = agent_info.usage_hints or ""
-
-    system_message = (
-        "You are a helpful assistant that formats responses for end users.\n"
-        "You will be given:\n"
-        "- The original user query\n"
-        "- The name and description of the agent that ran\n"
-        "- The agent's execution status and raw result or error\n"
-        "- Optional usage hints describing how to present the answer\n\n"
-        "Your job is to produce a clear, user-friendly answer.\n"
-        "If there was an error, explain it briefly and politely.\n"
-        "Do not invent data that is not present in the result.\n"
-    )
-
-    user_message = (
-        f"User query:\n{user_query}\n\n"
-        f"Agent used: {agent_name}\n"
-        f"Agent description: {agent_info.description}\n\n"
-        f"Agent usage hints (if any): {usage_hints}\n\n"
-        f"Execution status: {status}\n"
-        f"Execution result (raw): {result_str}\n"
-        f"Execution error (if any): {error_text or 'None'}\n"
-        f"Execution metadata: {metadata_str}\n\n"
-        "Please produce a final answer for the user.\n"
-        "- If status is 'success', answer the query using the result.\n"
-        "- If status is 'error', explain what went wrong in simple terms.\n"
-        "- Keep the tone clear and concise."
-    )
+def fallback_chat_llm(user_query: str) -> str:
+    system_message = "You are a helpful assistant. Answer the user's question directly."
 
     payload = {
         "model": COMPOSER_MODEL_NAME,
         "messages": [
             {"role": "system", "content": system_message},
-            {"role": "user", "content": user_message},
+            {"role": "user", "content": user_query}
         ],
-        "max_tokens": 256,
+        "max_tokens": 256
     }
 
     try:
-        with httpx.Client(timeout=20.0) as client:
+        with httpx.Client(timeout=20) as client:
             resp = client.post(
                 f"{LITELLM_BASE_URL}/v1/chat/completions",
-                headers={
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {LITELLM_API_KEY}",
-                },
                 json=payload,
+                headers={"Authorization": f"Bearer {LITELLM_API_KEY}"},
             )
         resp.raise_for_status()
-        data = resp.json()
-
-        raw_content = data["choices"][0]["message"]["content"]
-        if not raw_content:
-            return build_fallback()
-
-        return raw_content.strip()
+        result = resp.json()["choices"][0]["message"]["content"]
+        return result.strip()
 
     except Exception as e:
-        print(f"[compose_final_answer_with_llm] Error calling LiteLLM (composer): {e}")
-        return build_fallback()
+        logger.error("[fallback_chat] Error calling chat fallback: %s", e)
+        return "AgentHost is not capable of handling this request right now."
 
 
-# ==========
-# FastAPI app
-# ==========
+# ============================================================
+# COMPOSER LLM (Final Answer Formatting)
+# ============================================================
 
-app = FastAPI(
-    title="AgentHost MVP",
-    version="0.0.8",
-    description=(
-        "AgentHost with in-memory agent registry, a simple DummyAgent, "
-        "routing_mode support (auto/manual), an LLM-based agent selector via LiteLLM, "
-        "a structured ExecutionRequest/ExecutionResponse contract, and an LLM-based "
-        "final response composer."
-    ),
-)
+def compose_final_answer_with_llm(
+    user_query: str,
+    agent_name: str,
+    agent_info: AgentInfo,
+    exec_res: ExecutionResponse,
+) -> str:
+
+    def fallback() -> str:
+        if exec_res.status != "success":
+            return f"Agent '{agent_name}' failed: {exec_res.error}"
+        return str(exec_res.result)
+
+    try:
+        system_msg = (
+            "You are a response formatter. Use the agent result to answer the user clearly.\n"
+            "If error: explain politely. Do not invent extra details."
+        )
+
+        user_msg = (
+            f"User query: {user_query}\n"
+            f"Agent used: {agent_name}\n"
+            f"Agent description: {agent_info.description}\n"
+            f"Execution status: {exec_res.status}\n"
+            f"Raw result: {exec_res.result}\n"
+            f"Error: {exec_res.error}\n"
+        )
+
+        payload = {
+            "model": COMPOSER_MODEL_NAME,
+            "messages": [
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": user_msg}
+            ],
+            "max_tokens": 200
+        }
+
+        with httpx.Client(timeout=20) as client:
+            resp = client.post(
+                f"{LITELLM_BASE_URL}/v1/chat/completions",
+                json=payload,
+                headers={"Authorization": f"Bearer {LITELLM_API_KEY}"},
+            )
+        resp.raise_for_status()
+        content = resp.json()["choices"][0]["message"]["content"]
+        return content.strip()
+
+    except Exception as e:
+        logger.error("[composer] LLM composer failed: %s", e)
+        return fallback()
+
+
+# ============================================================
+# FASTAPI APP
+# ============================================================
+
+app = FastAPI(title="AgentHost MVP", version="1.2")
 
 
 @app.on_event("startup")
-async def startup_event() -> None:
-    """
-    On startup, register a built-in DummyAgent into the registry.
-    """
+async def startup():
     register_builtin_dummy_agent()
+    logger.info("AgentHost started with agents: %s", list(AGENT_REGISTRY.keys()))
 
+
+# ============================================================
+# CORE QUERY ENDPOINT
+# ============================================================
 
 @app.post("/agenthost/query", response_model=QueryResponse)
-async def handle_query(payload: QueryRequest) -> QueryResponse:
-    """
-    Handle user queries:
+async def handle_query(payload: QueryRequest):
 
-    - routing_mode = 'manual':
-        * Uses payload.selected_agent (must exist in registry & handlers).
-        * Does NOT call the LLM router.
-    - routing_mode = 'auto' (default):
-        * Calls the LLM-based selector to choose an agent.
-        * If selector fails or returns 'none', falls back to DummyAgent.
+    logger.info(
+        "Incoming query | routing_mode=%s | selected_agent=%s | query=%r",
+        payload.routing_mode,
+        payload.selected_agent,
+        payload.user_query,
+    )
 
-    Then:
-    - Builds an ExecutionRequest
-    - Invokes the agent handler
-    - Sends ExecutionResponse + context to the Composer LLM
-    - Returns the composed final answer to the caller.
-    """
-
-    # Decide which agent to use
+    # ----------------------
+    # Routing Mode: MANUAL
+    # ----------------------
     if payload.routing_mode == "manual":
-        # Manual mode: user must specify selected_agent
         if not payload.selected_agent:
-            return QueryResponse(
-                reply=(
-                    "AgentHost error: routing_mode='manual' requires 'selected_agent' "
-                    "to be provided."
-                )
-            )
+            logger.warning("Manual mode but no selected_agent → fallback chat.")
+            return QueryResponse(reply=fallback_chat_llm(payload.user_query))
+
         agent_name = payload.selected_agent
+
     else:
-        # Auto mode: use LLM router to decide
-        agents_list = list(AGENT_REGISTRY.values())
-        routed_agent = select_agent_with_llm(payload.user_query, agents_list)
+        # ----------------------
+        # Routing Mode: AUTO
+        # ----------------------
+        # only consider agents that have handlers AND are healthy
+        all_infos = AGENT_REGISTRY.items()
+        eligible_agents: List[AgentInfo] = [
+            info for name, info in all_infos
+            if name in AGENT_HANDLERS and info.health_status == "healthy"
+        ]
 
-        if not routed_agent or routed_agent.lower() == "none":
-            # Fallback behaviour for now: use DummyAgent
-            agent_name = "DummyAgent"
-        else:
-            agent_name = routed_agent
+        if not eligible_agents:
+            logger.warning("No eligible agents (with handlers & healthy) → fallback chat.")
+            return QueryResponse(reply=fallback_chat_llm(payload.user_query))
 
-    # Look up agent in registry and handler mapping
+        agent_name = select_agent_with_llm(payload.user_query, eligible_agents)
+
+        if not agent_name:
+            logger.info("Router returned NONE → fallback chat.")
+            return QueryResponse(reply=fallback_chat_llm(payload.user_query))
+
+    # ----------------------
+    # Validate agent
+    # ----------------------
     agent_info = AGENT_REGISTRY.get(agent_name)
     handler = AGENT_HANDLERS.get(agent_name)
 
-    if agent_info is None or handler is None:
-        return QueryResponse(
-            reply=(
-                f"AgentHost error: selected agent '{agent_name}' "
-                "is not available in registry/handlers."
-            )
-        )
+    if not agent_info or not handler:
+        logger.warning("Invalid or unhandled agent '%s' → fallback chat.", agent_name)
+        return QueryResponse(reply=fallback_chat_llm(payload.user_query))
 
+    if agent_info.health_status != "healthy":
+        logger.warning("Agent unhealthy '%s' → fallback chat.", agent_name)
+        return QueryResponse(reply=fallback_chat_llm(payload.user_query))
+
+    logger.info("Using agent: %s", agent_name)
+
+    # ----------------------
     # Build ExecutionRequest
+    # ----------------------
     request_id = str(uuid.uuid4())
-    exec_request = ExecutionRequest(
+    exec_req = ExecutionRequest(
         request_id=request_id,
         user_query=payload.user_query,
         routing_mode=payload.routing_mode,
         selected_agent=agent_name,
     )
 
-    # Call the agent handler safely
+    # ----------------------
+    # Execute Agent
+    # ----------------------
     try:
-        exec_response = handler(exec_request)
+        exec_res = handler(exec_req)
     except Exception as e:
-        # If agent itself throws, wrap as ExecutionResponse error
-        exec_response = ExecutionResponse(
+        logger.error("Agent '%s' threw exception: %s", agent_name, e)
+        exec_res = ExecutionResponse(
             request_id=request_id,
             status="error",
+            error=str(e),
             result=None,
-            error=f"Agent '{agent_name}' raised an exception: {e}",
             metadata={"agent": agent_name},
         )
 
-    # Use Composer LLM to turn ExecutionResponse into final user answer
-    final_answer = compose_final_answer_with_llm(
-        user_query=payload.user_query,
-        agent_name=agent_name,
-        agent_info=agent_info,
-        exec_response=exec_response,
+    logger.info(
+        "Agent executed | request_id=%s | agent=%s | status=%s",
+        exec_res.request_id,
+        agent_name,
+        exec_res.status,
     )
 
-    return QueryResponse(reply=final_answer)
+    # ----------------------
+    # Compose Final Answer
+    # ----------------------
+    final = compose_final_answer_with_llm(
+        payload.user_query, agent_name, agent_info, exec_res
+    )
 
+    logger.info(
+        "Composer finished | request_id=%s | agent=%s | status=%s",
+        exec_res.request_id,
+        agent_name,
+        exec_res.status,
+    )
+
+    return QueryResponse(reply=final)
+
+
+# ============================================================
+# REGISTRY ENDPOINTS (List / Register / Deregister)
+# ============================================================
 
 @app.get("/agenthost/agents", response_model=AgentsListResponse)
-async def list_agents() -> AgentsListResponse:
+async def list_agents():
     """
-    Expose the in-memory registry so we can see which agents are registered.
-    Currently returns a single built-in DummyAgent.
+    List all registered agents (including DummyAgent + any external agents).
     """
-    agents = list(AGENT_REGISTRY.values())
-    return AgentsListResponse(agents=agents)
+    return AgentsListResponse(agents=list(AGENT_REGISTRY.values()))
 
 
-@app.get("/agenthost/agents", response_model=AgentsListResponse)
-async def list_agents() -> AgentsListResponse:
+@app.post("/agenthost/register", response_model=AgentInfo)
+async def register_agent(payload: AgentRegisterRequest):
     """
-    Expose the in-memory registry so we can see which agents are registered.
-    Currently returns a single built-in DummyAgent.
-    """
-    agents = list(AGENT_REGISTRY.values())
-    return AgentsListResponse(agents=agents)
+    Register or update an agent in the in-memory registry.
 
+    NOTE:
+    - Only agents that ALSO have a handler entry in AGENT_HANDLERS
+      will be actually executable and considered by the router.
+    - This endpoint manages metadata; execution wiring for external agents comes later.
+    """
+    agent = AgentInfo(**payload.model_dump())
+    AGENT_REGISTRY[agent.agent_name] = agent
+    logger.info("Agent registered/updated: %s", agent.agent_name)
+    return agent
+
+
+@app.post("/agenthost/deregister")
+async def deregister_agent(payload: AgentDeregisterRequest) -> Dict[str, Any]:
+    """
+    Deregister an agent from the in-memory registry.
+
+    This does NOT touch AGENT_HANDLERS (execution wiring). For now, handlers
+    are managed in code. Later, for HTTP-based agents, we will add dynamic
+    handler wiring as well.
+    """
+    name = payload.agent_name
+    if name in AGENT_REGISTRY:
+        del AGENT_REGISTRY[name]
+        logger.info("Agent deregistered: %s", name)
+        return {
+            "status": "ok",
+            "message": f"Agent '{name}' deregistered.",
+            "agent_name": name,
+        }
+    else:
+        logger.warning("Attempted to deregister non-existent agent: %s", name)
+        return {
+            "status": "not_found",
+            "message": f"Agent '{name}' not found in registry.",
+            "agent_name": name,
+        }
+
+@app.get("/agenthost/llm-models")
+async def list_llm_models():
+    """
+    Fetch the available LLM models from LiteLLM.
+    Returns exactly what LiteLLM returns from /v1/models.
+    """
+    try:
+        with httpx.Client(timeout=15.0) as client:
+            resp = client.get(
+                f"{LITELLM_BASE_URL}/v1/models",
+                headers={
+                    "Authorization": f"Bearer {LITELLM_API_KEY}"
+                }
+            )
+        resp.raise_for_status()
+        data = resp.json()
+        logger.info("Fetched LLM model list from LiteLLM.")
+        return data
+
+    except Exception as e:
+        logger.error("Error fetching LLM models: %s", e)
+        return {
+            "status": "error",
+            "message": "Unable to fetch models from LiteLLM.",
+            "error": str(e),
+        }
 
 if __name__ == "__main__":
     import uvicorn
