@@ -16,6 +16,11 @@ GenAILabs is a development environment for working with local language models. I
          │ OpenAI-compatible API
          ▼
 ┌─────────────────┐
+│   Agent Host    │  (Port 8000) - Agent routing & orchestration
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
 │  LiteLLM Proxy  │  (Port 4100) - Model routing & authentication
 │  + PostgreSQL   │  (Port 5433) - Usage tracking database
 └────────┬────────┘
@@ -26,6 +31,14 @@ GenAILabs is a development environment for working with local language models. I
 │  Models Runtime │  (tinyllama, qwen2.5, phi)
 └─────────────────┘
 ```
+
+### 📌 Port Allocation Scheme
+
+- **4100**: LiteLLM Proxy (Model routing & API gateway)
+- **5000-5999**: Reserved for Agent Services
+- **6000-6999**: Reserved for MCP (Model Context Protocol) Services
+- **8000**: AgentHost (Agent orchestration & routing)
+- **8501**: Streamlit UI (Web interface)
 
 ## ✨ Features
 
@@ -61,7 +74,33 @@ cp .env.example .env  # Configure if needed
 docker-compose up -d
 ```
 
-### 3. Start Streamlit Interface
+### 3. Start AgentHost
+
+```bash
+cd agent_host
+uv venv .venv
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+uv sync
+python main.py
+```
+
+AgentHost will be available at `http://localhost:8000`
+
+### 4. Start MCP File Service
+
+```bash
+cd mcp_file_service
+uv venv .venv
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+uv sync
+python main.py
+```
+
+MCP File Service will be available at `http://localhost:6001`
+- API Documentation: `http://localhost:6001/docs`
+- Endpoints: `/status`, `/list-files`, `/create-file`, `/delete-file`
+
+### 5. Start Streamlit Interface
 
 ```bash
 cd streamlit_service
@@ -71,7 +110,7 @@ uv sync
 streamlit run main.py
 ```
 
-### 4. Open Your Browser
+### 6. Open Your Browser
 
 Navigate to `http://localhost:8501` and start chatting!
 
@@ -83,9 +122,17 @@ GenAILabs/
 │   ├── PHASE1_CURRENT.md  # Current implementation details
 │   ├── PHASE2_PLANNED.md  # Future roadmap
 │   └── README.md          # Detailed architecture overview
+├── agent_host/           # Agent orchestration service
+│   ├── main.py           # FastAPI agent routing
+│   ├── pyproject.toml
+│   └── README.md
 ├── litellm_hub/          # LiteLLM proxy service
 │   ├── docker-compose.yml
 │   ├── litellm_config.yaml
+│   └── README.md
+├── mcp_file_service/     # MCP file operations service
+│   ├── main.py           # FastAPI file management
+│   ├── pyproject.toml
 │   └── README.md
 ├── streamlit_service/    # Streamlit chat interface
 │   ├── main.py
