@@ -6,6 +6,8 @@ import os
 import uuid
 import logging
 from logging.handlers import RotatingFileHandler
+from dotenv import load_dotenv
+
 
 
 # ============================================================
@@ -31,7 +33,7 @@ logger.setLevel(logging.INFO)
 logger.addHandler(console_handler)
 logger.addHandler(file_handler)
 
-
+load_dotenv()
 # ============================================================
 # LITELLM CONFIG
 # ============================================================
@@ -360,7 +362,7 @@ async def handle_query(payload: QueryRequest):
         if not eligible_agents:
             logger.warning("No eligible agents (with handlers & healthy) → fallback chat.")
             return QueryResponse(reply=fallback_chat_llm(payload.user_query))
-
+        
         agent_name = select_agent_with_llm(payload.user_query, eligible_agents)
 
         if not agent_name:

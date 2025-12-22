@@ -1,7 +1,7 @@
 import streamlit as st
 import requests
 from typing import List, Dict, Any
-
+from dotenv import load_dotenv
 # ===========================
 # Config (adjust if needed)
 # ===========================
@@ -10,6 +10,7 @@ DEFAULT_AGENTHOST_URL = "http://localhost:8000"
 DEFAULT_LITELLM_URL = "http://localhost:4100"
 DEFAULT_LITELLM_API_KEY = "sk-litellm-hub-local-123"
 
+load_dotenv()
 
 # ===========================
 # Helper functions
