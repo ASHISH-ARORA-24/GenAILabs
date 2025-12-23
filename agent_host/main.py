@@ -112,7 +112,7 @@ class AgentRegisterRequest(BaseModel):
 
 
 # Used for Deregister API
-class AgentDeregisterRequest(BaseModel):
+class AgentRequest(BaseModel):
     agent_name: str
 
 
@@ -315,20 +315,26 @@ def compose_final_answer_with_llm(
 # FASTAPI APP
 # ============================================================
 
-app = FastAPI(title="AgentHost MVP", version="1.2")
 
+from contextlib import asynccontextmanager
 
-@app.on_event("startup")
-async def startup():
+@asynccontextmanager
+async def lifespan(app):
     register_builtin_dummy_agent()
     logger.info("AgentHost started with agents: %s", list(AGENT_REGISTRY.keys()))
+    yield
 
+app = FastAPI(title="AgentHost MVP", version="1.2", lifespan=lifespan)
+
+@app.get("/health")
+async def health_check():
+    return {"status": "healthy"}
 
 # ============================================================
 # CORE QUERY ENDPOINT
 # ============================================================
 
-@app.post("/agenthost/query", response_model=QueryResponse)
+@app.post("/query", response_model=QueryResponse)
 async def handle_query(payload: QueryRequest):
 
     logger.info(
@@ -439,15 +445,38 @@ async def handle_query(payload: QueryRequest):
 # REGISTRY ENDPOINTS (List / Register / Deregister)
 # ============================================================
 
-@app.get("/agenthost/agents", response_model=AgentsListResponse)
+@app.get("/agents", response_model=AgentsListResponse)
 async def list_agents():
     """
     List all registered agents (including DummyAgent + any external agents).
     """
     return AgentsListResponse(agents=list(AGENT_REGISTRY.values()))
 
+from fastapi import Query
 
-@app.post("/agenthost/register", response_model=AgentInfo)
+@app.get("/agent")
+async def get_agent(agent_name: str = Query(..., description="Name of the agent to retrieve")) -> Dict[str, Any]:
+    """
+    Retrieve an agent's information from the in-memory registry.
+
+    This does NOT touch AGENT_HANDLERS (execution wiring). For now, handlers
+    are managed in code. Later, for HTTP-based agents, we will add dynamic
+    handler wiring as well.
+    """
+    name = agent_name
+    agent = AGENT_REGISTRY.get(name)
+    if agent:
+        logger.info("Agent retrieved: %s", name)
+        return {"status": "ok", "agent": agent}
+    else:
+        logger.warning("Attempted to retrieve non-existent agent: %s", name)
+        return {
+            "status": "not_found",
+            "message": f"Agent '{name}' not found in registry.",
+            "agent_name": name,
+        }
+
+@app.post("/agent", response_model=AgentInfo)
 async def register_agent(payload: AgentRegisterRequest):
     """
     Register or update an agent in the in-memory registry.
@@ -463,8 +492,8 @@ async def register_agent(payload: AgentRegisterRequest):
     return agent
 
 
-@app.post("/agenthost/deregister")
-async def deregister_agent(payload: AgentDeregisterRequest) -> Dict[str, Any]:
+@app.delete("/agent")
+async def deregister_agent(payload: AgentRequest) -> Dict[str, Any]:
     """
     Deregister an agent from the in-memory registry.
 
@@ -489,7 +518,7 @@ async def deregister_agent(payload: AgentDeregisterRequest) -> Dict[str, Any]:
             "agent_name": name,
         }
 
-@app.get("/agenthost/llm-models")
+@app.get("/llm-models")
 async def list_llm_models():
     """
     Fetch the available LLM models from LiteLLM.

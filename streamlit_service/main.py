@@ -31,7 +31,7 @@ def get_litellm_api_key() -> str:
 @st.cache_data(show_spinner=False)
 def fetch_agents(agenthost_url: str) -> List[Dict[str, Any]]:
     try:
-        resp = requests.get(f"{agenthost_url}/agenthost/agents", timeout=5)
+        resp = requests.get(f"{agenthost_url}/agents", timeout=5)
         resp.raise_for_status()
         data = resp.json()
         return data.get("agents", [])
@@ -43,11 +43,11 @@ def fetch_agents(agenthost_url: str) -> List[Dict[str, Any]]:
 @st.cache_data(show_spinner=False)
 def fetch_llm_models(agenthost_url: str) -> List[str]:
     """
-    Uses AgentHost endpoint /agenthost/llm-models,
+    Uses AgentHost endpoint /llm-models,
     which internally calls LiteLLM /v1/models.
     """
     try:
-        resp = requests.get(f"{agenthost_url}/agenthost/llm-models", timeout=5)
+        resp = requests.get(f"{agenthost_url}/llm-models", timeout=5)
         resp.raise_for_status()
         data = resp.json()
         # Expecting LiteLLM-like structure: { "data": [ {"id": "..."} ] }
@@ -75,7 +75,7 @@ def call_agenthost_query(
     }
     try:
         resp = requests.post(
-            f"{agenthost_url}/agenthost/query",
+            f"{agenthost_url}/query",
             json=payload,
             timeout=30,
         )

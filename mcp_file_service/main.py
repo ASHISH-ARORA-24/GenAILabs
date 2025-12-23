@@ -2,9 +2,9 @@ from fastapi import FastAPI, HTTPException
 from typing import List
 app = FastAPI()
 
-@app.get("/status")
-def read_status():
-    return {"status": "ok"} 
+@app.get("/health")
+def health():
+    return {"status": "healthy"}
 
 @app.get("/list-files", response_model=List[str])
 def list_files(folder_name: str):

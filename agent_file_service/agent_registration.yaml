@@ -1,0 +1,16 @@
+agent_registration:
+  agent_name: "FileServiceAgent"
+  description: "Handles file storage, retrieval, and metadata management for GenAILabs."
+  capability_tags:
+    - file-management
+    - storage
+    - metadata
+  curated_routing_prompts: "Upload, download, or list files. Retrieve file metadata."
+  example_queries:
+    - "Upload a new document to the workspace."
+    - "List all files in the project folder."
+    - "Get metadata for test1.txt."
+  usage_hints: "Use this agent to manage files and access file metadata."
+  how_to_call: "POST /files/upload, GET /files/list, GET /files/metadata/{filename}"
+  version: "1.0.0"
+  health_status: "healthy"
